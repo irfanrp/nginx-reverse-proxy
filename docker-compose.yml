@@ -10,8 +10,9 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d
       - ./nginx/snippets:/etc/nginx/snippets:ro
+      - ./nginx/reload-watcher.sh:/usr/local/bin/reload-watcher.sh:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
-    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+    command: ["/bin/sh", "/usr/local/bin/reload-watcher.sh"]
     networks:
       - proxy
 
