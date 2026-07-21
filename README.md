@@ -24,13 +24,17 @@ nginx-reverse-proxy/
     │   ├── redirect-https.conf # redirect HTTP -> HTTPS
     │   ├── ssl.conf            # path cert wildcard
     │   ├── security-headers.conf
-    │   └── proxy-params.conf   # proxy_set_header standar
+    │   ├── proxy-params.conf   # proxy_set_header standar
+    │   ├── authelia-authz-location.conf  # endpoint internal auth_request
+    │   └── authelia-authreq.conf         # gating Authelia (dipasang di location /)
     └── conf.d/                 # 1 file per domain
         ├── _template.conf.example  # pola acuan (tidak di-load)
-        ├── core.conf           # core.aboutdevops.my.id      -> backend:8080
-        ├── dashboard.conf      # dashboard.aboutdevops.my.id -> frontend:3000
-        ├── docusaurus.conf     # docs.aboutdevops.my.id      -> docusaurus:3000
-        └── pritunl.conf        # vpn.aboutdevops.my.id       -> pritunl (web + VPN)
+        ├── core.conf           # core.aboutdevops.my.id         -> backend:8080
+        ├── dashboard.conf      # dashboard.aboutdevops.my.id    -> frontend:3000
+        ├── docusaurus.conf     # docs.aboutdevops.my.id         -> docs-site:3000 (public)
+        ├── docs-private.conf   # docs-private.aboutdevops.my.id -> docs-private:3000 (Authelia)
+        ├── auth.conf           # auth.aboutdevops.my.id         -> authelia:9091 (portal)
+        └── pritunl.conf        # vpn.aboutdevops.my.id          -> pritunl (web + VPN)
 ```
 
 ## Prasyarat
@@ -122,6 +126,40 @@ flowchart LR
 ```
 
 Ubah interval lewat env di service `nginx`, misal `RELOAD_INTERVAL=5`.
+
+## Private docs (Authelia forward-auth)
+
+Docs dibagi dua:
+
+- **Public** — `docs.aboutdevops.my.id` -> `docs-site:3000`, tanpa auth.
+- **Private** — `docs-private.aboutdevops.my.id` -> `docs-private:3000`, digate Authelia.
+- **Portal** — `auth.aboutdevops.my.id` -> `authelia:9091`, halaman login.
+
+Alur: request ke domain private diverifikasi ke Authelia lewat `auth_request`. Kalau belum login, user dilempar (302) ke portal, lalu balik ke URL semula setelah login.
+
+```mermaid
+flowchart LR
+  client["client"] -->|"docs-private."| nginx["nginx-proxy"]
+  nginx -->|"auth_request"| authelia["authelia:9091"]
+  authelia -->|"200 OK"| priv["docs-private:3000"]
+  authelia -->|"401"| redir["302 -> auth.aboutdevops.my.id"]
+```
+
+Config terkait: `nginx/conf.d/docs-private.conf`, `nginx/conf.d/auth.conf`, dan snippet `nginx/snippets/authelia-authz-location.conf` + `authelia-authreq.conf`.
+
+Untuk memproteksi service lain, tambahkan ke server block-nya:
+
+```nginx
+include /etc/nginx/snippets/authelia-authz-location.conf;   # di level server
+
+location / {
+    include /etc/nginx/snippets/authelia-authreq.conf;      # di dalam location
+    proxy_pass http://<upstream>;
+    include /etc/nginx/snippets/proxy-params.conf;
+}
+```
+
+> Prasyarat (dikelola terpisah): container `authelia` (port 9091) dan `docs-private` (port 3000) jalan di network `proxy`. Authelia pakai endpoint `/api/authz/auth-request` (>= 4.37), dengan session domain `aboutdevops.my.id` dan aturan akses untuk `docs-private.aboutdevops.my.id`.
 
 ## Variabel environment (`.env`)
 
