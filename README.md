@@ -193,18 +193,28 @@ Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) ja
 | Secret | Keterangan |
 |---|---|
 | `SSH_HOST` | IP / hostname VPS |
-| `SSH_USER` | User SSH (mis. `root` / `deploy`) |
+| `SSH_USER` | `ubuntu` (pakai `sudo`) atau `root` |
 | `SSH_PRIVATE_KEY` | Private key PEM untuk SSH |
 | `SSH_PORT` | Opsional, default `22` |
-| `DEPLOY_PATH` | Path **absolut** repo di VPS (folder yang punya `docker-compose.yml`), mis. `/opt/nginx-reverse-proxy` |
+| `DEPLOY_PATH` | Path **absolut** repo di VPS, mis. `/home/ubuntu/infra/nginx-reverse-proxy` |
 | `CLOUDFLARE_API_TOKEN` | Token Cloudflare (izin edit DNS zone) |
 | `SSL_EMAIL` | Email registrasi Let's Encrypt |
 
-**Prasyarat VPS:** Docker + Compose, network `proxy` sudah ada, user SSH bisa `docker compose` (atau `sudo` tanpa password), akses baca/tulis `/etc/letsencrypt` (biasanya lewat `sudo`).
+**Prasyarat VPS:** Docker + Compose, network `proxy` sudah ada.
 
-> Kalau log bilang `Cert belum ada` padahal cert sudah ada: biasanya user SSH tidak bisa baca `/etc/letsencrypt/live` tanpa sudo — workflow sudah mengatasinya dengan `sudo test`.
->
-> Kalau log bilang `no configuration file provided`: cek secret `DEPLOY_PATH` — harus absolut dan berisi `docker-compose.yml`.
+Kalau `SSH_USER=ubuntu`, `/etc/letsencrypt` root-only → butuh sudo **NOPASSWD** (CI gak bisa ketik password):
+
+```bash
+sudo visudo
+# ubuntu ALL=(ALL) NOPASSWD: ALL
+
+# verifikasi (harus langsung OK, tanpa minta password):
+sudo true && sudo ls /etc/letsencrypt/live/aboutdevops.my.id/fullchain.pem
+```
+
+Secret `SSH_USER` = `ubuntu`, `DEPLOY_PATH` = `/home/ubuntu/infra/nginx-reverse-proxy`.
+
+> Kalau log bilang `no configuration file provided`: cek `DEPLOY_PATH` benar (harus ada `docker-compose.yml`).
 
 > Renewal harian juga tetap diurus service `certbot` di compose (loop 12 jam). Workflow ini untuk first-issue + cek expiry terjadwal / on-demand.
 

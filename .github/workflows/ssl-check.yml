@@ -1,14 +1,13 @@
 # Check / issue / renew wildcard SSL via Certbot + Cloudflare DNS-01.
-# Jalan di GitHub-hosted (ubuntu-latest), lalu SSH ke VPS.
+# SSH sebagai ubuntu + sudo (butuh NOPASSWD di sudoers).
 #
 # Secrets:
-#   SSH_HOST              — IP / hostname VPS
-#   SSH_USER              — user SSH (mis. ubuntu)
-#   SSH_PRIVATE_KEY       — private key (PEM) untuk SSH
-#   SSH_PORT              — opsional, default 22
-#   DEPLOY_PATH           — path absolut repo di VPS, mis. /home/ubuntu/infra/nginx-reverse-proxy
-#   CLOUDFLARE_API_TOKEN  — Cloudflare API token (edit DNS zone)
-#   SSL_EMAIL             — email registrasi Let's Encrypt
+#   SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / SSH_PORT(optional)
+#   DEPLOY_PATH           — mis. /home/ubuntu/infra/nginx-reverse-proxy
+#   CLOUDFLARE_API_TOKEN / SSL_EMAIL
+#
+# VPS sudoers (sudah kamu set):
+#   ubuntu ALL=(ALL) NOPASSWD: ALL
 
 name: SSL Check
 
@@ -34,6 +33,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
+          request_pty: true
           envs: CLOUDFLARE_API_TOKEN,SSL_EMAIL,DOMAIN,DEPLOY_PATH
           script_stop: true
           script: |
@@ -55,12 +55,22 @@ jobs:
             fi
 
             cd "$DEPLOY_PATH"
-            echo "Working dir: $(pwd)"
-            echo "User: $(whoami) uid=$(id -u)"
+            echo "Working dir OK"
+            echo "uid=$(id -u) user=$(whoami)"
 
             if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${SSL_EMAIL:-}" ]; then
-              echo "ERROR: secrets CLOUDFLARE_API_TOKEN dan SSL_EMAIL wajib diisi."
+              echo "ERROR: CLOUDFLARE_API_TOKEN / SSL_EMAIL kosong"
               exit 1
+            fi
+
+            # Root: no sudo. Non-root: sudo (NOPASSWD).
+            if [ "$(id -u)" -eq 0 ]; then
+              run() { "$@"; }
+            else
+              echo "Testing sudo..."
+              sudo -v
+              echo "sudo OK"
+              run() { sudo -E "$@"; }
             fi
 
             {
@@ -68,29 +78,15 @@ jobs:
               echo "EMAIL=${SSL_EMAIL}"
               echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}"
             } > .env
+            echo ".env synced"
 
-            # Cek cert: live/ biasanya root-only → selalu lewat sudo.
             echo "Checking cert: $CERT_PEM"
-            if [ "$(id -u)" -eq 0 ]; then
-              SUDO=""
-            else
-              SUDO="sudo -n"
-              if ! $SUDO true 2>/dev/null; then
-                echo "ERROR: user $(whoami) butuh passwordless sudo (sudo -n gagal)."
-                echo "Tambah NOPASSWD di sudoers, atau pakai SSH_USER=root."
-                exit 1
-              fi
-            fi
-
-            if $SUDO test -f "$CERT_PEM"; then
-              echo "Cert ADA."
-              EXPIRY=$($SUDO openssl x509 -enddate -noout -in "$CERT_PEM" | cut -d= -f2)
+            if run test -f "$CERT_PEM"; then
+              echo "Cert ADA"
+              EXPIRY=$(run openssl x509 -enddate -noout -in "$CERT_PEM" | cut -d= -f2)
               echo "Raw expiry: $EXPIRY"
 
-              EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s) || {
-                echo "ERROR: gagal parse tanggal expiry: $EXPIRY"
-                exit 1
-              }
+              EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
               NOW_EPOCH=$(date +%s)
               DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
               echo "SSL expires in ${DAYS_LEFT} days."
@@ -100,8 +96,8 @@ jobs:
                 exit 0
               fi
 
-              echo "SSL expires in <30 days → renewing..."
-              $SUDO docker compose run --rm --entrypoint /bin/sh certbot -c '
+              echo "Renewing (<30 days left)..."
+              run docker compose run --rm --no-deps --entrypoint sh certbot -c '
                 set -e
                 umask 077
                 printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
@@ -113,7 +109,7 @@ jobs:
               echo "SSL renewed!"
             else
               echo "Cert BELUM ADA → issuing wildcard..."
-              $SUDO docker compose run --rm --entrypoint /bin/sh certbot -c '
+              run docker compose run --rm --no-deps --entrypoint sh certbot -c '
                 set -e
                 umask 077
                 printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
