@@ -1,7 +1,12 @@
 # Check / issue / renew wildcard SSL via Certbot + Cloudflare DNS-01.
-# Harus jalan di self-hosted runner di VPS yang sama (akses /etc/letsencrypt).
+# Jalan di GitHub-hosted (ubuntu-latest), lalu SSH ke VPS.
 #
-# Secrets yang dibutuhkan:
+# Secrets:
+#   SSH_HOST              — IP / hostname VPS
+#   SSH_USER              — user SSH (mis. root / deploy)
+#   SSH_PRIVATE_KEY       — private key (PEM) untuk SSH
+#   SSH_PORT              — opsional, default 22
+#   DEPLOY_PATH           — path repo di VPS (folder yang punya docker-compose.yml)
 #   CLOUDFLARE_API_TOKEN  — Cloudflare API token (edit DNS zone)
 #   SSL_EMAIL             — email registrasi Let's Encrypt
 
@@ -20,82 +25,88 @@ on:
 
 jobs:
   ssl:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Setup SSL on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          envs: CLOUDFLARE_API_TOKEN,SSL_EMAIL,DOMAIN,DEPLOY_PATH
+          script_stop: true
+          script: |
+            set -euo pipefail
 
-      - name: Setup SSL
+            echo "=== Setup SSL ==="
+            DOMAIN="${DOMAIN:-aboutdevops.my.id}"
+            CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
+            cd "$DEPLOY_PATH"
+
+            if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${SSL_EMAIL:-}" ]; then
+              echo "ERROR: secrets CLOUDFLARE_API_TOKEN dan SSL_EMAIL wajib diisi."
+              exit 1
+            fi
+
+            # Sync secrets ke .env (gitignored) supaya docker compose env_file jalan.
+            {
+              echo "DOMAIN=${DOMAIN}"
+              echo "EMAIL=${SSL_EMAIL}"
+              echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}"
+            } > .env
+
+            issue_cert() {
+              echo "Issuing wildcard cert for ${DOMAIN} + *.${DOMAIN}..."
+              # DNS-01: gak perlu matiin port 80/443 (nginx tetap jalan).
+              docker compose run --rm --entrypoint /bin/sh certbot -c '
+                set -e
+                umask 077
+                printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
+                certbot certonly \
+                  --dns-cloudflare \
+                  --dns-cloudflare-credentials /etc/cloudflare.ini \
+                  --non-interactive --agree-tos \
+                  --email "$EMAIL" \
+                  -d "$DOMAIN" \
+                  -d "*.$DOMAIN"
+              '
+            }
+
+            renew_cert() {
+              echo "Renewing cert..."
+              docker compose run --rm --entrypoint /bin/sh certbot -c '
+                set -e
+                umask 077
+                printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
+                certbot renew \
+                  --dns-cloudflare \
+                  --dns-cloudflare-credentials /etc/cloudflare.ini \
+                  --quiet
+              '
+            }
+
+            if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
+              echo "Cert belum ada → issue baru."
+              issue_cert
+              echo "SSL setup complete!"
+            else
+              EXPIRY=$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" | cut -d= -f2)
+              EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+              NOW_EPOCH=$(date +%s)
+              DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+
+              echo "SSL expires in ${DAYS_LEFT} days."
+              if [ "$DAYS_LEFT" -lt 30 ]; then
+                renew_cert
+                echo "SSL renewed!"
+              else
+                echo "SSL still valid, skipping."
+              fi
+            fi
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           SSL_EMAIL: ${{ secrets.SSL_EMAIL }}
           DOMAIN: aboutdevops.my.id
-        run: |
-          set -euo pipefail
-
-          echo "=== Setup SSL ==="
-          CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
-
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${SSL_EMAIL:-}" ]; then
-            echo "ERROR: secrets CLOUDFLARE_API_TOKEN dan SSL_EMAIL wajib diisi."
-            exit 1
-          fi
-
-          # Sync secrets ke .env (gitignored) supaya docker compose env_file jalan.
-          {
-            echo "DOMAIN=${DOMAIN}"
-            echo "EMAIL=${SSL_EMAIL}"
-            echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}"
-          } > .env
-
-          issue_cert() {
-            echo "Issuing wildcard cert for ${DOMAIN} + *.${DOMAIN}..."
-            # Override entrypoint renew-loop → one-shot certonly.
-            # DNS-01: gak perlu matiin port 80/443 (nginx tetap jalan).
-            docker compose run --rm --entrypoint /bin/sh certbot -c '
-              set -e
-              umask 077
-              printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
-              certbot certonly \
-                --dns-cloudflare \
-                --dns-cloudflare-credentials /etc/cloudflare.ini \
-                --non-interactive --agree-tos \
-                --email "$EMAIL" \
-                -d "$DOMAIN" \
-                -d "*.$DOMAIN"
-            '
-          }
-
-          renew_cert() {
-            echo "Renewing cert..."
-            docker compose run --rm --entrypoint /bin/sh certbot -c '
-              set -e
-              umask 077
-              printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
-              certbot renew \
-                --dns-cloudflare \
-                --dns-cloudflare-credentials /etc/cloudflare.ini \
-                --quiet
-            '
-          }
-
-          if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-            echo "Cert belum ada → issue baru."
-            issue_cert
-            echo "SSL setup complete!"
-          else
-            EXPIRY=$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" | cut -d= -f2)
-            # Linux (self-hosted Ubuntu): date -d. Fallback macOS: date -jf.
-            EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || date -jf "%b %d %T %Y %Z" "$EXPIRY" +%s)
-            NOW_EPOCH=$(date +%s)
-            DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
-
-            echo "SSL expires in ${DAYS_LEFT} days."
-            if [ "$DAYS_LEFT" -lt 30 ]; then
-              renew_cert
-              echo "SSL renewed!"
-            else
-              echo "SSL still valid, skipping."
-            fi
-          fi
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}

@@ -15,7 +15,7 @@ Reverse proxy berbasis Nginx (Docker) dengan TLS otomatis via Let's Encrypt (Cer
 ```
 nginx-reverse-proxy/
 ├── .github/workflows/
-│   └── ssl-check.yml           # issue / cek expiry / renew cert (self-hosted)
+│   └── ssl-check.yml           # issue / cek expiry / renew cert (ubuntu-latest → SSH VPS)
 ├── docker-compose.yml          # service: nginx + certbot
 ├── .env                        # secret (gitignored) - dibuat dari .env.example
 ├── .env.example                # template env
@@ -175,7 +175,7 @@ location / {
 
 ## GitHub Actions — SSL Check
 
-Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) jalan di **self-hosted runner** di VPS yang sama (butuh akses `/etc/letsencrypt`).
+Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) jalan di **GitHub-hosted** (`ubuntu-latest`), lalu SSH ke VPS untuk issue/cek/renew cert di `/etc/letsencrypt`.
 
 | Trigger | Kapan |
 |---|---|
@@ -192,10 +192,15 @@ Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) ja
 
 | Secret | Keterangan |
 |---|---|
+| `SSH_HOST` | IP / hostname VPS |
+| `SSH_USER` | User SSH (mis. `root` / `deploy`) |
+| `SSH_PRIVATE_KEY` | Private key PEM untuk SSH |
+| `SSH_PORT` | Opsional, default `22` |
+| `DEPLOY_PATH` | Path absolut repo di VPS (folder yang punya `docker-compose.yml`) |
 | `CLOUDFLARE_API_TOKEN` | Token Cloudflare (izin edit DNS zone) |
 | `SSL_EMAIL` | Email registrasi Let's Encrypt |
 
-**Prasyarat runner:** label `self-hosted`, Docker + Compose, akses tulis ke `/etc/letsencrypt`, network `proxy` sudah ada, checkout jalan di folder yang punya `docker-compose.yml`.
+**Prasyarat VPS:** Docker + Compose, network `proxy` sudah ada, user SSH bisa `docker compose`, akses tulis ke `/etc/letsencrypt`.
 
 > Renewal harian juga tetap diurus service `certbot` di compose (loop 12 jam). Workflow ini untuk first-issue + cek expiry terjadwal / on-demand.
 
