@@ -175,48 +175,50 @@ location / {
 
 ## GitHub Actions — SSL Check
 
-Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) jalan di **GitHub-hosted** (`ubuntu-latest`), lalu SSH ke VPS untuk issue/cek/renew cert di `/etc/letsencrypt`.
+Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) runs on **GitHub-hosted** (`ubuntu-latest`), then SSHs into the VPS to issue / check / renew certs under `/etc/letsencrypt`.
 
-| Trigger | Kapan |
+| Trigger | When |
 |---|---|
-| `workflow_dispatch` | Manual dari tab Actions |
-| `schedule` | Senin 03:00 UTC |
-| `push` ke `main` | Kalau `ssl-check.yml` / `docker-compose.yml` berubah |
+| `workflow_dispatch` | Manual run from the Actions tab |
+| `schedule` | Mondays at 03:00 UTC |
+| `push` to `main` | When `ssl-check.yml` or `docker-compose.yml` changes |
 
-**Perilaku:**
-1. Cert belum ada → issue wildcard `aboutdevops.my.id` + `*.aboutdevops.my.id` (DNS-01, nginx **tidak** dimatiin).
-2. Cert ada & sisa umur **&lt; 30 hari** → renew.
-3. Masih valid → skip.
+**Behavior:**
+1. No cert yet → issue wildcard `aboutdevops.my.id` + `*.aboutdevops.my.id` (DNS-01; nginx stays up).
+2. Cert exists and expires in **&lt; 30 days** → renew.
+3. Still valid → skip.
 
 **Secrets** (Settings → Secrets and variables → Actions):
 
-| Secret | Keterangan |
+| Secret | Description |
 |---|---|
-| `SSH_HOST` | IP / hostname VPS |
-| `SSH_USER` | `ubuntu` (pakai `sudo`) atau `root` |
-| `SSH_PRIVATE_KEY` | Private key PEM untuk SSH |
-| `SSH_PORT` | Opsional, default `22` |
-| `DEPLOY_PATH` | Path **absolut** repo di VPS, mis. `/home/ubuntu/infra/nginx-reverse-proxy` |
-| `CLOUDFLARE_API_TOKEN` | Token Cloudflare (izin edit DNS zone) |
-| `SSL_EMAIL` | Email registrasi Let's Encrypt |
+| `SSH_HOST` | VPS IP or hostname |
+| `SSH_USER` | `ubuntu` (uses `sudo`) or `root` |
+| `SSH_PRIVATE_KEY` | PEM private key for SSH |
+| `SSH_PORT` | Optional, default `22` |
+| `DEPLOY_PATH` | Absolute repo path on the VPS, e.g. `/home/ubuntu/infra/nginx-reverse-proxy` |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token (DNS edit permission) |
+| `SSL_EMAIL` | Let's Encrypt registration email |
 
-**Prasyarat VPS:** Docker + Compose, network `proxy` sudah ada.
+**VPS prerequisites:** Docker + Compose, `proxy` network exists.
 
-Kalau `SSH_USER=ubuntu`, `/etc/letsencrypt` root-only → butuh sudo **NOPASSWD** (CI gak bisa ketik password):
+If `SSH_USER=ubuntu`, `/etc/letsencrypt` is root-only → passwordless sudo is required (CI cannot type a password):
 
 ```bash
 sudo visudo
 # ubuntu ALL=(ALL) NOPASSWD: ALL
 
-# verifikasi (harus langsung OK, tanpa minta password):
+# verify (must succeed with no password prompt):
 sudo true && sudo ls /etc/letsencrypt/live/aboutdevops.my.id/fullchain.pem
 ```
 
-Secret `SSH_USER` = `ubuntu`, `DEPLOY_PATH` = `/home/ubuntu/infra/nginx-reverse-proxy`.
+Example secrets: `SSH_USER=ubuntu`, `DEPLOY_PATH=/home/ubuntu/infra/nginx-reverse-proxy`.
 
-> Kalau log bilang `no configuration file provided`: cek `DEPLOY_PATH` benar (harus ada `docker-compose.yml`).
-
-> Renewal harian juga tetap diurus service `certbot` di compose (loop 12 jam). Workflow ini untuk first-issue + cek expiry terjadwal / on-demand.
+> If the log says `no configuration file provided`, check `DEPLOY_PATH` (must contain `docker-compose.yml`).
+>
+> Keep `script_stop: false` in the workflow — `true` breaks multiline `if`/`then` in drone-ssh.
+>
+> Day-to-day renewal is also handled by the `certbot` compose service (12h loop). This workflow covers first issue + scheduled / on-demand expiry checks.
 
 ## Perintah berguna
 
