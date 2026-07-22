@@ -1,13 +1,13 @@
 # Check / issue / renew wildcard SSL via Certbot + Cloudflare DNS-01.
-# SSH sebagai ubuntu + sudo (butuh NOPASSWD di sudoers).
+# SSH sebagai ubuntu + sudo (NOPASSWD).
 #
 # Secrets:
 #   SSH_HOST / SSH_USER / SSH_PRIVATE_KEY / SSH_PORT(optional)
 #   DEPLOY_PATH           — mis. /home/ubuntu/infra/nginx-reverse-proxy
 #   CLOUDFLARE_API_TOKEN / SSL_EMAIL
 #
-# VPS sudoers (sudah kamu set):
-#   ubuntu ALL=(ALL) NOPASSWD: ALL
+# IMPORTANT: script_stop harus false — kalau true, drone-ssh putus
+# if/then per baris → exit 1 diam (bug yang kita alami).
 
 name: SSL Check
 
@@ -34,95 +34,83 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
           request_pty: true
+          script_stop: false
           envs: CLOUDFLARE_API_TOKEN,SSL_EMAIL,DOMAIN,DEPLOY_PATH
-          script_stop: true
           script: |
-            set -eu
-
+            bash -s <<'END'
+            set -euo pipefail
             echo "=== Setup SSL ==="
             DOMAIN="${DOMAIN:-aboutdevops.my.id}"
             CERT_PEM="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 
-            if [ -z "${DEPLOY_PATH:-}" ]; then
-              echo "ERROR: secret DEPLOY_PATH kosong."
-              echo "Contoh: /home/ubuntu/infra/nginx-reverse-proxy"
+            echo "1. check DEPLOY_PATH"
+            if [[ -z "${DEPLOY_PATH:-}" ]]; then
+              echo "ERROR: DEPLOY_PATH secret kosong"
               exit 1
             fi
-            if [ ! -f "$DEPLOY_PATH/docker-compose.yml" ]; then
-              echo "ERROR: docker-compose.yml tidak ada di: $DEPLOY_PATH"
-              ls -la "$DEPLOY_PATH" || true
+            if [[ ! -f "${DEPLOY_PATH}/docker-compose.yml" ]]; then
+              echo "ERROR: no docker-compose.yml in ${DEPLOY_PATH}"
+              ls -la "${DEPLOY_PATH}" || true
               exit 1
             fi
-
-            cd "$DEPLOY_PATH"
+            cd "${DEPLOY_PATH}"
             echo "Working dir OK"
-            echo "uid=$(id -u) user=$(whoami)"
 
-            if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${SSL_EMAIL:-}" ]; then
-              echo "ERROR: CLOUDFLARE_API_TOKEN / SSL_EMAIL kosong"
+            echo "2. check secrets (uid=$(id -u))"
+            if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${SSL_EMAIL:-}" ]]; then
+              echo "ERROR: CLOUDFLARE_API_TOKEN or SSL_EMAIL secret kosong"
               exit 1
             fi
+            echo "Secrets OK (token_len=${#CLOUDFLARE_API_TOKEN} email_len=${#SSL_EMAIL})"
 
-            # Root: no sudo. Non-root: sudo (NOPASSWD).
-            if [ "$(id -u)" -eq 0 ]; then
-              run() { "$@"; }
-            else
-              echo "Testing sudo..."
-              sudo -v
-              echo "sudo OK"
-              run() { sudo -E "$@"; }
+            echo "3. write .env"
+            printf 'DOMAIN=%s\nEMAIL=%s\nCLOUDFLARE_API_TOKEN=%s\n' \
+              "${DOMAIN}" "${SSL_EMAIL}" "${CLOUDFLARE_API_TOKEN}" > .env
+
+            echo "4. check sudo"
+            if ! sudo true; then
+              echo "ERROR: sudo gagal. Pastikan: ubuntu ALL=(ALL) NOPASSWD: ALL"
+              exit 1
             fi
+            echo "sudo OK"
 
-            {
-              echo "DOMAIN=${DOMAIN}"
-              echo "EMAIL=${SSL_EMAIL}"
-              echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}"
-            } > .env
-            echo ".env synced"
-
-            echo "Checking cert: $CERT_PEM"
-            if run test -f "$CERT_PEM"; then
+            echo "5. check cert ${CERT_PEM}"
+            if sudo test -f "${CERT_PEM}"; then
               echo "Cert ADA"
-              EXPIRY=$(run openssl x509 -enddate -noout -in "$CERT_PEM" | cut -d= -f2)
-              echo "Raw expiry: $EXPIRY"
-
-              EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
-              NOW_EPOCH=$(date +%s)
+              EXPIRY="$(sudo openssl x509 -enddate -noout -in "${CERT_PEM}" | cut -d= -f2)"
+              echo "Raw expiry: ${EXPIRY}"
+              EXPIRY_EPOCH="$(date -d "${EXPIRY}" +%s)"
+              NOW_EPOCH="$(date +%s)"
               DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
               echo "SSL expires in ${DAYS_LEFT} days."
 
-              if [ "$DAYS_LEFT" -ge 30 ]; then
+              if [[ "${DAYS_LEFT}" -ge 30 ]]; then
                 echo "SSL still valid, skipping."
                 exit 0
               fi
 
-              echo "Renewing (<30 days left)..."
-              run docker compose run --rm --no-deps --entrypoint sh certbot -c '
+              echo "6. renewing..."
+              sudo -E docker compose run --rm --no-deps --entrypoint sh certbot -c '
                 set -e
                 umask 077
                 printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
-                certbot renew \
-                  --dns-cloudflare \
-                  --dns-cloudflare-credentials /etc/cloudflare.ini \
-                  --quiet
+                certbot renew --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare.ini --quiet
               '
               echo "SSL renewed!"
             else
-              echo "Cert BELUM ADA → issuing wildcard..."
-              run docker compose run --rm --no-deps --entrypoint sh certbot -c '
+              echo "6. cert missing → issuing wildcard..."
+              sudo -E docker compose run --rm --no-deps --entrypoint sh certbot -c '
                 set -e
                 umask 077
                 printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
-                certbot certonly \
-                  --dns-cloudflare \
-                  --dns-cloudflare-credentials /etc/cloudflare.ini \
-                  --non-interactive --agree-tos \
-                  --email "$EMAIL" \
-                  -d "$DOMAIN" \
-                  -d "*.$DOMAIN"
+                certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare.ini \
+                  --non-interactive --agree-tos --email "$EMAIL" \
+                  -d "$DOMAIN" -d "*.$DOMAIN"
               '
               echo "SSL setup complete!"
             fi
+            echo "=== DONE ==="
+            END
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           SSL_EMAIL: ${{ secrets.SSL_EMAIL }}
