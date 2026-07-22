@@ -3,10 +3,10 @@
 #
 # Secrets:
 #   SSH_HOST              — IP / hostname VPS
-#   SSH_USER              — user SSH (mis. root / deploy)
+#   SSH_USER              — user SSH (mis. ubuntu)
 #   SSH_PRIVATE_KEY       — private key (PEM) untuk SSH
 #   SSH_PORT              — opsional, default 22
-#   DEPLOY_PATH           — path absolut repo di VPS (folder yang punya docker-compose.yml)
+#   DEPLOY_PATH           — path absolut repo di VPS, mis. /home/ubuntu/infra/nginx-reverse-proxy
 #   CLOUDFLARE_API_TOKEN  — Cloudflare API token (edit DNS zone)
 #   SSL_EMAIL             — email registrasi Let's Encrypt
 
@@ -15,7 +15,6 @@ name: SSL Check
 on:
   workflow_dispatch:
   schedule:
-    # Cek tiap Senin 03:00 UTC
     - cron: "0 3 * * 1"
   push:
     branches: [main]
@@ -38,18 +37,15 @@ jobs:
           envs: CLOUDFLARE_API_TOKEN,SSL_EMAIL,DOMAIN,DEPLOY_PATH
           script_stop: true
           script: |
-            set -euo pipefail
+            set -eu
 
             echo "=== Setup SSL ==="
             DOMAIN="${DOMAIN:-aboutdevops.my.id}"
-            CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
+            CERT_PEM="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 
             if [ -z "${DEPLOY_PATH:-}" ]; then
-              echo "ERROR: secret DEPLOY_PATH kosong. Isi path absolut repo di VPS."
-              exit 1
-            fi
-            if [ ! -d "$DEPLOY_PATH" ]; then
-              echo "ERROR: DEPLOY_PATH tidak ada: $DEPLOY_PATH"
+              echo "ERROR: secret DEPLOY_PATH kosong."
+              echo "Contoh: /home/ubuntu/infra/nginx-reverse-proxy"
               exit 1
             fi
             if [ ! -f "$DEPLOY_PATH/docker-compose.yml" ]; then
@@ -60,37 +56,64 @@ jobs:
 
             cd "$DEPLOY_PATH"
             echo "Working dir: $(pwd)"
+            echo "User: $(whoami) uid=$(id -u)"
 
             if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${SSL_EMAIL:-}" ]; then
               echo "ERROR: secrets CLOUDFLARE_API_TOKEN dan SSL_EMAIL wajib diisi."
               exit 1
             fi
 
-            # Sync secrets ke .env (gitignored) supaya docker compose env_file jalan.
             {
               echo "DOMAIN=${DOMAIN}"
               echo "EMAIL=${SSL_EMAIL}"
               echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}"
             } > .env
 
-            # docker compose butuh akses tulis /etc/letsencrypt → biasanya perlu sudo.
-            DC="docker compose"
-            if ! docker compose version >/dev/null 2>&1; then
-              echo "ERROR: docker compose tidak tersedia untuk user ini."
-              exit 1
-            fi
-            # Kalau user gak bisa akses socket / perlu root untuk cert dir, pakai sudo.
-            if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-              if ! docker compose ps >/dev/null 2>&1 || ! test -w /etc/letsencrypt 2>/dev/null; then
-                DC="sudo -E docker compose"
+            # Cek cert: live/ biasanya root-only → selalu lewat sudo.
+            echo "Checking cert: $CERT_PEM"
+            if [ "$(id -u)" -eq 0 ]; then
+              SUDO=""
+            else
+              SUDO="sudo -n"
+              if ! $SUDO true 2>/dev/null; then
+                echo "ERROR: user $(whoami) butuh passwordless sudo (sudo -n gagal)."
+                echo "Tambah NOPASSWD di sudoers, atau pakai SSH_USER=root."
+                exit 1
               fi
             fi
-            echo "Using: $DC"
 
-            issue_cert() {
-              echo "Issuing wildcard cert for ${DOMAIN} + *.${DOMAIN}..."
-              # DNS-01: gak perlu matiin port 80/443 (nginx tetap jalan).
-              $DC run --rm --entrypoint /bin/sh certbot -c '
+            if $SUDO test -f "$CERT_PEM"; then
+              echo "Cert ADA."
+              EXPIRY=$($SUDO openssl x509 -enddate -noout -in "$CERT_PEM" | cut -d= -f2)
+              echo "Raw expiry: $EXPIRY"
+
+              EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s) || {
+                echo "ERROR: gagal parse tanggal expiry: $EXPIRY"
+                exit 1
+              }
+              NOW_EPOCH=$(date +%s)
+              DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+              echo "SSL expires in ${DAYS_LEFT} days."
+
+              if [ "$DAYS_LEFT" -ge 30 ]; then
+                echo "SSL still valid, skipping."
+                exit 0
+              fi
+
+              echo "SSL expires in <30 days → renewing..."
+              $SUDO docker compose run --rm --entrypoint /bin/sh certbot -c '
+                set -e
+                umask 077
+                printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
+                certbot renew \
+                  --dns-cloudflare \
+                  --dns-cloudflare-credentials /etc/cloudflare.ini \
+                  --quiet
+              '
+              echo "SSL renewed!"
+            else
+              echo "Cert BELUM ADA → issuing wildcard..."
+              $SUDO docker compose run --rm --entrypoint /bin/sh certbot -c '
                 set -e
                 umask 077
                 printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
@@ -102,55 +125,7 @@ jobs:
                   -d "$DOMAIN" \
                   -d "*.$DOMAIN"
               '
-            }
-
-            renew_cert() {
-              echo "Renewing cert..."
-              $DC run --rm --entrypoint /bin/sh certbot -c '
-                set -e
-                umask 077
-                printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
-                certbot renew \
-                  --dns-cloudflare \
-                  --dns-cloudflare-credentials /etc/cloudflare.ini \
-                  --quiet
-              '
-            }
-
-            # /etc/letsencrypt/live biasanya root-only → cek pakai sudo.
-            cert_exists() {
-              if [ "$(id -u)" -eq 0 ]; then
-                test -f "$CERT_DIR/fullchain.pem"
-              else
-                sudo test -f "$CERT_DIR/fullchain.pem"
-              fi
-            }
-
-            read_expiry() {
-              if [ "$(id -u)" -eq 0 ]; then
-                openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" | cut -d= -f2
-              else
-                sudo openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" | cut -d= -f2
-              fi
-            }
-
-            if ! cert_exists; then
-              echo "Cert belum ada di $CERT_DIR → issue baru."
-              issue_cert
               echo "SSL setup complete!"
-            else
-              EXPIRY=$(read_expiry)
-              EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
-              NOW_EPOCH=$(date +%s)
-              DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
-
-              echo "SSL found. Expires in ${DAYS_LEFT} days."
-              if [ "$DAYS_LEFT" -lt 30 ]; then
-                renew_cert
-                echo "SSL renewed!"
-              else
-                echo "SSL still valid, skipping."
-              fi
             fi
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
