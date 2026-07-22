@@ -1,245 +1,204 @@
 # Nginx Reverse Proxy
 
-Reverse proxy berbasis Nginx (Docker) dengan TLS otomatis via Let's Encrypt (Certbot + Cloudflare DNS challenge), konfigurasi per-domain yang DRY lewat _snippets_, dan auto-reload yang aman (validasi dulu sebelum reload).
+Dockerized Nginx reverse proxy with Let's Encrypt (Certbot + Cloudflare DNS-01), DRY config via snippets, safe auto-reload, and Authelia forward-auth for private docs.
 
-## Fitur
+## Features
 
-- **Reverse proxy multi-domain** — tiap domain punya file config sendiri di `nginx/conf.d/`.
-- **TLS otomatis** — Certbot pakai Cloudflare DNS-01 challenge, cocok untuk wildcard cert dan domain di belakang Cloudflare. Auto-renew tiap 12 jam.
-- **Config DRY** — blok berulang (redirect, SSL, security headers, proxy params) diekstrak ke `nginx/snippets/` dan tinggal di-`include`.
-- **Auto-reload aman** — `nginx/reload-watcher.sh` memantau perubahan config/cert, jalankan `nginx -t` dulu; kalau valid baru reload, kalau invalid di-skip (proxy lama tetap jalan).
-- **VPN passthrough** — TCP stream untuk Pritunl VPN (port 1194).
+- Multi-domain reverse proxy (`nginx/conf.d/` — one file per domain)
+- Automatic TLS via Cloudflare DNS-01 (wildcard-friendly); renew loop every 12h
+- Shared snippets for redirect, SSL, security headers, proxy headers, Authelia
+- Safe auto-reload: `nginx -t` before reload; invalid config is skipped
+- Pritunl VPN TCP passthrough (port 1194)
+- GitHub Actions SSL check / renew (`scripts/ssl-check.sh`)
 
-## Struktur
+## Layout
 
 ```
 nginx-reverse-proxy/
-├── .github/workflows/
-│   └── ssl-check.yml           # SSL check/renew (SSH → scripts/ssl-check.sh)
-├── scripts/
-│   └── ssl-check.sh            # Certbot issue / expiry check / renew
-├── docker-compose.yml          # service: nginx + certbot
-├── .env                        # secret (gitignored) - dibuat dari .env.example
-├── .env.example                # template env
+├── .github/workflows/ssl-check.yml
+├── scripts/ssl-check.sh
+├── docker-compose.yml          # nginx + certbot
+├── .env.example
 └── nginx/
-    ├── nginx.conf              # config utama (http + stream)
-    ├── reload-watcher.sh       # auto-reload + validasi
-    ├── snippets/               # blok config reusable
-    │   ├── redirect-https.conf # redirect HTTP -> HTTPS
-    │   ├── ssl.conf            # path cert wildcard
+    ├── nginx.conf
+    ├── reload-watcher.sh
+    ├── snippets/
+    │   ├── redirect-https.conf
+    │   ├── ssl.conf
     │   ├── security-headers.conf
-    │   ├── proxy-params.conf   # proxy_set_header standar
-    │   ├── authelia-authz-location.conf  # endpoint internal auth_request
-    │   └── authelia-authreq.conf         # gating Authelia (dipasang di location /)
-    └── conf.d/                 # 1 file per domain
-        ├── _template.conf.example  # pola acuan (tidak di-load)
-        ├── core.conf           # core.aboutdevops.my.id         -> backend:8080
-        ├── dashboard.conf      # dashboard.aboutdevops.my.id    -> frontend:3000
-        ├── docusaurus.conf     # docs.aboutdevops.my.id         -> docs-site:3000 (public)
-        ├── docs-private.conf   # docs-private.aboutdevops.my.id -> docs-private:3000 (Authelia)
-        ├── auth.conf           # auth.aboutdevops.my.id         -> authelia:9091 (portal)
-        └── pritunl.conf        # vpn.aboutdevops.my.id          -> pritunl (web + VPN)
+    │   ├── proxy-params.conf
+    │   ├── authelia-authz-location.conf
+    │   └── authelia-authreq.conf
+    └── conf.d/
+        ├── _template.conf.example
+        ├── core.conf           # core.aboutdevops.my.id         → backend:8080
+        ├── dashboard.conf      # dashboard.aboutdevops.my.id    → frontend:3000
+        ├── docusaurus.conf     # docs.aboutdevops.my.id         → docs-site:3000 (public)
+        ├── docs-private.conf   # docs-private.aboutdevops.my.id → docs-private:3000 (Authelia)
+        ├── auth.conf           # auth.aboutdevops.my.id         → authelia:9091
+        └── pritunl.conf        # vpn.aboutdevops.my.id          → pritunl
 ```
 
-## Prasyarat
+## Prerequisites
 
-- Docker + Docker Compose.
-- Docker network eksternal bernama `proxy` (dipakai bareng service backend lain):
+- Docker + Compose
+- External Docker network `proxy`:
   ```bash
   docker network create proxy
   ```
-- Domain kamu dikelola di Cloudflare, dan sudah punya API token dengan izin edit DNS zone.
-- Cert Let's Encrypt tersimpan di host `/etc/letsencrypt` (mount ke container).
+- Domain on Cloudflare + API token with DNS edit permission
+- Host path `/etc/letsencrypt` mounted into containers
 
 ## Setup
 
-1. **Siapkan env**
+1. **Env**
    ```bash
    cp .env.example .env
-   # isi CLOUDFLARE_API_TOKEN, EMAIL, DOMAIN
+   # set DOMAIN, EMAIL, CLOUDFLARE_API_TOKEN
    ```
 
-2. **Buat network (kalau belum ada)**
+2. **Network** (if needed)
    ```bash
    docker network create proxy
    ```
 
-3. **Terbitkan cert pertama kali** (contoh wildcard, sekali jalan):
+3. **First certificate** (wildcard, once)
    ```bash
-   docker compose run --rm certbot certbot certonly \
-     --dns-cloudflare \
-     --dns-cloudflare-credentials /etc/cloudflare.ini \
-     -d 'aboutdevops.my.id' -d '*.aboutdevops.my.id' \
-     --email "$EMAIL" --agree-tos --no-eff-email
+   docker compose run --rm --entrypoint sh certbot -c '
+     umask 077
+     printf "dns_cloudflare_api_token = %s\n" "$CLOUDFLARE_API_TOKEN" > /etc/cloudflare.ini
+     certbot certonly --dns-cloudflare \
+       --dns-cloudflare-credentials /etc/cloudflare.ini \
+       --non-interactive --agree-tos --email "$EMAIL" \
+       -d "$DOMAIN" -d "*.$DOMAIN"
+   '
    ```
-   > Renewal berikutnya otomatis lewat service `certbot`.
+   Later renewals: `certbot` service (12h) + GitHub Actions SSL workflow.
 
-4. **Jalankan**
+4. **Start**
    ```bash
    docker compose up -d
    docker compose exec nginx nginx -t
    ```
 
-## Menambah domain baru
+## Add a domain
 
-1. Copy template jadi file config baru:
-   ```bash
-   cp nginx/conf.d/_template.conf.example nginx/conf.d/<nama>.conf
-   ```
-2. Ganti `<domain>` dan `<upstream>` (contoh `http://myservice:8080`).
-3. Pastikan container target berada di network `proxy` supaya nama service bisa di-resolve Nginx.
-4. Simpan — `reload-watcher.sh` otomatis validasi + reload (maks ~10 detik). Tidak perlu reload manual.
-
-Pola minimal (lihat `nginx/conf.d/_template.conf.example`):
-
-```nginx
-server {
-    listen 80;
-    listen [::]:80;
-    server_name <domain>;
-    include /etc/nginx/snippets/redirect-https.conf;
-}
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
-    server_name <domain>;
-
-    include /etc/nginx/snippets/ssl.conf;
-    include /etc/nginx/snippets/security-headers.conf;
-
-    location / {
-        proxy_pass <upstream>;
-        include /etc/nginx/snippets/proxy-params.conf;
-    }
-}
+```bash
+cp nginx/conf.d/_template.conf.example nginx/conf.d/<name>.conf
+# set <domain> and <upstream>, e.g. http://myservice:8080
 ```
 
-> Cert: subdomain `*.aboutdevops.my.id` sudah tercakup wildcard di `nginx/snippets/ssl.conf`. Domain lain perlu diterbitkan cert-nya dulu.
+Upstream container must join network `proxy`. Save the file — `reload-watcher.sh` validates and reloads within ~10s.
 
-## Cara kerja auto-reload
+`*.aboutdevops.my.id` is covered by the wildcard cert in `nginx/snippets/ssl.conf`. Other domains need their own cert first.
 
-`reload-watcher.sh` memantau `nginx.conf`, `conf.d/`, `snippets/`, dan `letsencrypt/live` via checksum (polling, interval `RELOAD_INTERVAL`, default `10`s).
+## Auto-reload
+
+`reload-watcher.sh` polls checksums of `nginx.conf`, `conf.d/`, `snippets/`, and `letsencrypt/live` (default interval `10s`, override with `RELOAD_INTERVAL`).
 
 ```mermaid
 flowchart LR
-  change["config / cert berubah"] --> detect["watcher deteksi (checksum)"]
+  change["config / cert change"] --> detect["checksum change"]
   detect --> test{"nginx -t"}
   test -->|valid| reload["nginx -s reload"]
-  test -->|invalid| skip["skip + log, config lama jalan"]
+  test -->|"invalid"| skip["skip — keep old config"]
 ```
 
-Ubah interval lewat env di service `nginx`, misal `RELOAD_INTERVAL=5`.
+## Private docs (Authelia)
 
-## Private docs (Authelia forward-auth)
-
-Docs dibagi dua:
-
-- **Public** — `docs.aboutdevops.my.id` -> `docs-site:3000`, tanpa auth.
-- **Private** — `docs-private.aboutdevops.my.id` -> `docs-private:3000`, digate Authelia.
-- **Portal** — `auth.aboutdevops.my.id` -> `authelia:9091`, halaman login.
-
-Alur: request ke domain private diverifikasi ke Authelia lewat `auth_request`. Kalau belum login, user dilempar (302) ke portal, lalu balik ke URL semula setelah login.
+| Host | Upstream | Auth |
+|---|---|---|
+| `docs.aboutdevops.my.id` | `docs-site:3000` | Public |
+| `docs-private.aboutdevops.my.id` | `docs-private:3000` | Authelia |
+| `auth.aboutdevops.my.id` | `authelia:9091` | Login portal |
 
 ```mermaid
 flowchart LR
-  client["client"] -->|"docs-private."| nginx["nginx-proxy"]
+  client["client"] -->|"docs-private"| nginx["nginx-proxy"]
   nginx -->|"auth_request"| authelia["authelia:9091"]
-  authelia -->|"200 OK"| priv["docs-private:3000"]
-  authelia -->|"401"| redir["302 -> auth.aboutdevops.my.id"]
+  authelia -->|"200"| priv["docs-private:3000"]
+  authelia -->|"401"| redir["302 → auth.aboutdevops.my.id"]
 ```
 
-Config terkait: `nginx/conf.d/docs-private.conf`, `nginx/conf.d/auth.conf`, dan snippet `nginx/snippets/authelia-authz-location.conf` + `authelia-authreq.conf`.
-
-Untuk memproteksi service lain, tambahkan ke server block-nya:
+Protect another service:
 
 ```nginx
-include /etc/nginx/snippets/authelia-authz-location.conf;   # di level server
+include /etc/nginx/snippets/authelia-authz-location.conf;  # server level
 
 location / {
-    include /etc/nginx/snippets/authelia-authreq.conf;      # di dalam location
+    include /etc/nginx/snippets/authelia-authreq.conf;     # location level
     proxy_pass http://<upstream>;
     include /etc/nginx/snippets/proxy-params.conf;
 }
 ```
 
-> Prasyarat (dikelola terpisah): container `authelia` (port 9091) dan `docs-private` (port 3000) jalan di network `proxy`. Authelia pakai endpoint `/api/authz/auth-request` (>= 4.37), dengan session domain `aboutdevops.my.id` dan aturan akses untuk `docs-private.aboutdevops.my.id`.
+`authelia` (9091) and `docs-private` (3000) must run on network `proxy` (managed separately). Authelia ≥ 4.37 with `/api/authz/auth-request`, session domain `aboutdevops.my.id`.
 
-## Variabel environment (`.env`)
+## Environment (`.env`)
 
-| Variabel | Dipakai oleh | Keterangan |
+| Variable | Used by | Notes |
 |---|---|---|
-| `CLOUDFLARE_API_TOKEN` | certbot | Token Cloudflare untuk DNS challenge. Digenerate jadi `/etc/cloudflare.ini` saat start. |
-| `EMAIL` | certbot | Email registrasi Let's Encrypt (untuk penerbitan cert manual). |
-| `DOMAIN` | referensi | Domain utama. |
+| `CLOUDFLARE_API_TOKEN` | certbot / ssl-check | Written to `/etc/cloudflare.ini` at runtime |
+| `EMAIL` | certbot / ssl-check | Let's Encrypt registration email |
+| `DOMAIN` | certbot / ssl-check | Primary domain (e.g. `aboutdevops.my.id`) |
 
-> `.env` berisi secret dan sudah masuk `.gitignore`. Jangan commit.
+`.env` is gitignored — do not commit it.
 
 ## GitHub Actions — SSL Check
 
-Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) runs on **GitHub-hosted** (`ubuntu-latest`), copies [`scripts/ssl-check.sh`](scripts/ssl-check.sh) to the VPS, then SSHs in to issue / check / renew certs under `/etc/letsencrypt`.
+[`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) runs on `ubuntu-latest`, copies [`scripts/ssl-check.sh`](scripts/ssl-check.sh) to the VPS, then SSHs in to issue / check / renew certs.
 
 | Trigger | When |
 |---|---|
-| `workflow_dispatch` | Manual run from the Actions tab |
-| `schedule` | Mondays at 03:00 UTC |
-| `push` to `main` | When `ssl-check.yml` or `docker-compose.yml` changes |
+| `workflow_dispatch` | Manual |
+| `schedule` | Mondays 03:00 UTC |
+| `push` to `main` | Changes to the workflow, script, or `docker-compose.yml` |
 
-**Behavior:**
-1. No cert yet → issue wildcard `aboutdevops.my.id` + `*.aboutdevops.my.id` (DNS-01; nginx stays up).
-2. Cert exists and expires in **&lt; 30 days** → renew.
-3. Still valid → skip.
-
-**Secrets** (Settings → Secrets and variables → Actions):
+**Behavior:** missing cert → issue wildcard; &lt; 30 days left → renew; else skip.
 
 | Secret | Description |
 |---|---|
-| `SSH_HOST` | VPS IP or hostname |
-| `SSH_USER` | `ubuntu` (uses `sudo`) or `root` |
-| `SSH_PRIVATE_KEY` | PEM private key for SSH |
-| `SSH_PORT` | Optional, default `22` |
-| `DEPLOY_PATH` | Absolute repo path on the VPS, e.g. `/home/ubuntu/infra/nginx-reverse-proxy` |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token (DNS edit permission) |
-| `SSL_EMAIL` | Let's Encrypt registration email |
+| `SSH_HOST` | VPS host |
+| `SSH_USER` | `ubuntu` (sudo) or `root` |
+| `SSH_PRIVATE_KEY` | PEM key |
+| `SSH_PORT` | Optional (default `22`) |
+| `DEPLOY_PATH` | Absolute repo path, e.g. `/home/ubuntu/infra/nginx-reverse-proxy` |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare DNS token |
+| `SSL_EMAIL` | Let's Encrypt email |
 
-**VPS prerequisites:** Docker + Compose, `proxy` network exists.
-
-If `SSH_USER=ubuntu`, `/etc/letsencrypt` is root-only → passwordless sudo is required (CI cannot type a password):
+If `SSH_USER=ubuntu`, configure passwordless sudo (`/etc/letsencrypt` is root-only):
 
 ```bash
 sudo visudo
 # ubuntu ALL=(ALL) NOPASSWD: ALL
-
-# verify (must succeed with no password prompt):
 sudo true && sudo ls /etc/letsencrypt/live/aboutdevops.my.id/fullchain.pem
 ```
 
-Example secrets: `SSH_USER=ubuntu`, `DEPLOY_PATH=/home/ubuntu/infra/nginx-reverse-proxy`.
-
-> If the log says `no configuration file provided`, check `DEPLOY_PATH` (must contain `docker-compose.yml`).
->
-> Keep `script_stop: false` in the workflow — `true` breaks multiline `if`/`then` in drone-ssh.
->
-> Day-to-day renewal is also handled by the `certbot` compose service (12h loop). This workflow covers first issue + scheduled / on-demand expiry checks.
-
-## Perintah berguna
+Manual run on the VPS:
 
 ```bash
-docker compose up -d                    # start
-docker compose logs -f nginx            # lihat log watcher/reload
-docker compose logs -f certbot          # lihat log renewal
-docker compose exec nginx nginx -t      # tes config
-docker compose exec certbot certbot certificates   # cek cert
-docker compose restart nginx            # restart manual (jarang perlu)
+cd /home/ubuntu/infra/nginx-reverse-proxy
+EMAIL=... CLOUDFLARE_API_TOKEN=... ./scripts/ssl-check.sh
+```
+
+## Useful commands
+
+```bash
+docker compose up -d
+docker compose logs -f nginx
+docker compose logs -f certbot
+docker compose exec nginx nginx -t
+docker compose exec certbot certbot certificates
 ```
 
 ## Troubleshooting
 
-- **`nginx: host not found in upstream "..."`** — container target belum ada / belum join network `proxy`. Pastikan service target `networks: [proxy]`.
-- **Certbot: `Unable to find post-hook command nginx`** — hook lama tersimpan di renewal config. Bersihkan:
+- **`host not found in upstream`** — target container missing or not on network `proxy`.
+- **`Unable to find post-hook command nginx`** — stale hook in renewal config:
   ```bash
   sed -i '/^post_hook/d' /etc/letsencrypt/renewal/*.conf
   docker compose up -d --force-recreate certbot
   ```
-  Reload nginx sudah ditangani `reload-watcher.sh`, jadi post-hook tidak diperlukan.
-- **Cert tidak ke-reload setelah renew** — watcher memantau `letsencrypt/live`; cek `docker compose logs nginx` untuk baris `[reload-watcher]`.
+  Reload is handled by `reload-watcher.sh`; post-hook is not needed.
+- **Cert renewed but nginx still uses old cert** — check `docker compose logs nginx` for `[reload-watcher]`.
+- **CI: `no configuration file provided`** — fix `DEPLOY_PATH` (must contain `docker-compose.yml`).
