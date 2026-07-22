@@ -15,7 +15,9 @@ Reverse proxy berbasis Nginx (Docker) dengan TLS otomatis via Let's Encrypt (Cer
 ```
 nginx-reverse-proxy/
 ├── .github/workflows/
-│   └── ssl-check.yml           # issue / cek expiry / renew cert (ubuntu-latest → SSH VPS)
+│   └── ssl-check.yml           # SSL check/renew (SSH → scripts/ssl-check.sh)
+├── scripts/
+│   └── ssl-check.sh            # Certbot issue / expiry check / renew
 ├── docker-compose.yml          # service: nginx + certbot
 ├── .env                        # secret (gitignored) - dibuat dari .env.example
 ├── .env.example                # template env
@@ -175,7 +177,7 @@ location / {
 
 ## GitHub Actions — SSL Check
 
-Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) runs on **GitHub-hosted** (`ubuntu-latest`), then SSHs into the VPS to issue / check / renew certs under `/etc/letsencrypt`.
+Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) runs on **GitHub-hosted** (`ubuntu-latest`), copies [`scripts/ssl-check.sh`](scripts/ssl-check.sh) to the VPS, then SSHs in to issue / check / renew certs under `/etc/letsencrypt`.
 
 | Trigger | When |
 |---|---|
