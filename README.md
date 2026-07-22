@@ -14,6 +14,8 @@ Reverse proxy berbasis Nginx (Docker) dengan TLS otomatis via Let's Encrypt (Cer
 
 ```
 nginx-reverse-proxy/
+├── .github/workflows/
+│   └── ssl-check.yml           # issue / cek expiry / renew cert (self-hosted)
 ├── docker-compose.yml          # service: nginx + certbot
 ├── .env                        # secret (gitignored) - dibuat dari .env.example
 ├── .env.example                # template env
@@ -170,6 +172,32 @@ location / {
 | `DOMAIN` | referensi | Domain utama. |
 
 > `.env` berisi secret dan sudah masuk `.gitignore`. Jangan commit.
+
+## GitHub Actions — SSL Check
+
+Workflow [`.github/workflows/ssl-check.yml`](.github/workflows/ssl-check.yml) jalan di **self-hosted runner** di VPS yang sama (butuh akses `/etc/letsencrypt`).
+
+| Trigger | Kapan |
+|---|---|
+| `workflow_dispatch` | Manual dari tab Actions |
+| `schedule` | Senin 03:00 UTC |
+| `push` ke `main` | Kalau `ssl-check.yml` / `docker-compose.yml` berubah |
+
+**Perilaku:**
+1. Cert belum ada → issue wildcard `aboutdevops.my.id` + `*.aboutdevops.my.id` (DNS-01, nginx **tidak** dimatiin).
+2. Cert ada & sisa umur **&lt; 30 hari** → renew.
+3. Masih valid → skip.
+
+**Secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Keterangan |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Token Cloudflare (izin edit DNS zone) |
+| `SSL_EMAIL` | Email registrasi Let's Encrypt |
+
+**Prasyarat runner:** label `self-hosted`, Docker + Compose, akses tulis ke `/etc/letsencrypt`, network `proxy` sudah ada, checkout jalan di folder yang punya `docker-compose.yml`.
+
+> Renewal harian juga tetap diurus service `certbot` di compose (loop 12 jam). Workflow ini untuk first-issue + cek expiry terjadwal / on-demand.
 
 ## Perintah berguna
 
