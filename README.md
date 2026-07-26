@@ -36,7 +36,8 @@ nginx-reverse-proxy/
         ├── docusaurus.conf     # docs.aboutdevops.my.id         → docs-site:3000 (public)
         ├── docs-private.conf   # docs-private.aboutdevops.my.id → docs-private:3000 (Authelia)
         ├── auth.conf           # auth.aboutdevops.my.id         → authelia:9091
-        └── pritunl.conf        # vpn.aboutdevops.my.id          → pritunl
+        ├── pritunl.conf        # vpn.aboutdevops.my.id          → pritunl
+        └── infisical.conf      # infisical.aboutdevops.my.id    → infisical-backend:8080
 ```
 
 ## Prerequisites
